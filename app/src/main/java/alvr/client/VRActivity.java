@@ -99,17 +99,10 @@ public class VRActivity extends Activity {
         //    No USB / wireless-debug / file-manager needed.
         maybeShowPreviousCrash();
 
-        // 2) Load native libs defensively, loading the Qiyu SDK dependency chain
-        //    explicitly so any failure names the EXACT missing library/symbol
-        //    instead of surfacing deep inside native_lib. Any failure is caught.
-        try {
-            loadNativeLibs();
-        } catch (Throwable t) {
-            String libs = "Native library load failed.\n"
-                    + "If the message says \"cannot locate symbol\", that symbol is missing from\n"
-                    + "the named .so (version/ABI mismatch or packaging issue).\n"
-                    + "If it says \"library ... not found\", that .so is not packaged in the APK.\n\n";
-            showErrorScreen(libs + "Error detail:\n\n" + Log.getStackTraceString(t));
+        // 2) Load native libs defensively. loadNativeLibs() shows its own error
+        //    screen on failure (with the EXACT failed library name prominent),
+        //    so we just bail if it returns false.
+        if (!loadNativeLibs()) {
             return;
         }
 
@@ -137,6 +130,8 @@ public class VRActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        // If native lib loading failed, the rendering thread was never created.
+        if (mRenderingHandler == null) return;
         Semaphore sem = new Semaphore(1);
         try {
             sem.acquire();
@@ -232,19 +227,22 @@ public class VRActivity extends Activity {
     //   libalvr_client_core.so -> Rust core (may want libc++_shared)
     //   libnative_lib.so       -> our bridge, needs all above
     //
-    // CRITICAL: libashreader.so MUST be loaded BEFORE libqiyivrsdkcore.so, because
-    // qiyivrsdkcore has DT_NEEDED libashreader.so, and the Android linker does NOT
-    // search the app's nativeLibraryDir for bare-name deps -- only already-loaded
-    // libs and system paths. Loading in the wrong order = "library not found" cascade.
-    private void loadNativeLibs() {
+    // Shows a MINIMAL on-screen status: each lib gets an OK/FAIL line. On failure,
+    // the failed lib name is shown HUGE and red so it's readable even when the VR
+    // compositor crops the 2D surface. Returns false on failure (screen already shown).
+    private boolean loadNativeLibs() {
         String dir = getApplicationInfo().nativeLibraryDir;
+
+        // Build the status text as we go. On failure this becomes the error screen.
+        StringBuilder status = new StringBuilder();
 
         // libc++_shared.so is OPTIONAL: the Qiyu prebuilts use libstdc++.so (system),
         // not libc++_shared; only the Rust core *might* need it. Try it, don't fail.
         try {
             System.load(dir + "/libc++_shared.so");
+            status.append("  OK   libc++_shared.so\n");
         } catch (Throwable ignored) {
-            // not packaged or not needed -- continue
+            status.append("  --   libc++_shared.so (optional)\n");
         }
 
         // Required chain in dependency order.
@@ -257,13 +255,84 @@ public class VRActivity extends Activity {
                 "libalvr_client_core.so",
                 "libnative_lib.so",
         };
+
         for (String lib : required) {
             try {
                 System.load(dir + "/" + lib);
+                status.append("  OK   ").append(lib).append("\n");
             } catch (Throwable t) {
-                throw new RuntimeException("Failed to load " + lib, t);
+                // FAILED. Show a minimal screen: the status list (small) + the
+                // failed lib name HUGE + the cause keyword. Each piece is short
+                // enough to survive VR compositor cropping.
+                status.append(" FAIL  ").append(lib).append("\n");
+
+                String cause = t.getMessage();
+                if (cause == null) cause = t.toString();
+                String fact = extractKeyFact(cause);
+
+                // Full detail to file for later analysis.
+                writeCrashFile("Failed to load " + lib + "\nCause: " + cause
+                        + "\n\nStatus:\n" + status.toString()
+                        + "\n\nFull stack:\n" + Log.getStackTraceString(t));
+
+                // Best-effort TTS (may not work on custom VR ROMs without TTS engine).
+                speak(lib + " failed to load. " + fact.replace("\n", " "));
+
+                showLoadErrorScreen(lib, fact, status.toString());
+                return false;
             }
         }
+        return true;
+    }
+
+    // Minimal error screen: failed library name HUGE + cause keyword + small
+    // status list. Every line is short so the VR compositor's center-crop
+    // doesn't hide the key information.
+    private void showLoadErrorScreen(String failedLib, String causeFact, String statusList) {
+        // The failed library name — THE key fact. Huge, red, centered.
+        TextView libName = new TextView(this);
+        libName.setText(failedLib);
+        libName.setTextColor(0xFFFF0000);
+        libName.setTextSize(TypedValue.COMPLEX_UNIT_SP, 32);
+        libName.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        libName.setGravity(Gravity.CENTER);
+        libName.setPadding(8, 8, 8, 8);
+
+        // The cause keyword (e.g. "MISSING LIB:\nlibstdc++.so"). Yellow, large.
+        TextView cause = new TextView(this);
+        cause.setText(causeFact);
+        cause.setTextColor(0xFFFFFF00);
+        cause.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        cause.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        cause.setGravity(Gravity.CENTER);
+        cause.setPadding(8, 4, 8, 8);
+
+        // The full status list (small, green) so the user sees which libs loaded OK.
+        TextView list = new TextView(this);
+        list.setText(statusList);
+        list.setTextColor(0xFF00FF00);
+        list.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        list.setTypeface(Typeface.MONOSPACE);
+        list.setGravity(Gravity.CENTER);
+        list.setPadding(8, 8, 8, 8);
+
+        LinearLayout center = new LinearLayout(this);
+        center.setOrientation(LinearLayout.VERTICAL);
+        center.setGravity(Gravity.CENTER);
+        center.setBackgroundColor(0xFF000000);
+        center.addView(libName);
+        center.addView(cause);
+        center.addView(list);
+
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(0xFF000000);
+        root.addView(center, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER));
+
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        setContentView(root);
     }
 
     @SuppressWarnings("unused")
@@ -364,6 +433,7 @@ public class VRActivity extends Activity {
     // the visible center of the VR view: the missing library, or the missing symbol.
     // Handles several Android linker error phrasings across versions.
     private String extractKeyFact(String msg) {
+        if (msg == null || msg.isEmpty()) return "Unknown error";
         // "library \"libfoo.so\" not found"
         Matcher m = Pattern.compile("library \"([^\"]+)\" not found").matcher(msg);
         if (m.find()) return "MISSING LIB:\n" + shortName(m.group(1));
@@ -373,21 +443,30 @@ public class VRActivity extends Activity {
         // "cannot load library \"libfoo.so\""
         m = Pattern.compile("cannot load library \"([^\"]+)\"").matcher(msg);
         if (m.find()) return "MISSING LIB:\n" + shortName(m.group(1));
+        // "cannot find library \"libfoo.so\"" (different verb on some Android versions)
+        m = Pattern.compile("cannot find library \"([^\"]+)\"").matcher(msg);
+        if (m.find()) return "MISSING LIB:\n" + shortName(m.group(1));
         // "needed by ... libfoo.so" -- the lib that has the unmet dependency
         m = Pattern.compile("needed by [^ ]*lib([a-z0-9_]+)\\.so").matcher(msg);
         if (m.find()) return "DEP MISSING FOR:\nlib" + m.group(1) + ".so";
+        // "Library libfoo.so not found" (old format, no quotes)
+        m = Pattern.compile("Library (lib[a-z0-9_]+\\.so) not found").matcher(msg);
+        if (m.find()) return "MISSING LIB:\n" + m.group(1);
         // any ".so" path quoted
         m = Pattern.compile("\"([^\"]+\\.so)\"").matcher(msg);
         if (m.find()) return "LIB ERROR:\n" + shortName(m.group(1));
+        // bare "libXXX.so" mention
+        m = Pattern.compile("(lib[a-z0-9_]+\\.so)").matcher(msg);
+        if (m.find()) return "LIB ERROR:\n" + m.group(1);
         // fallback: first non-empty line, truncated
         for (String line : msg.split("\n")) {
             line = line.trim();
             if (!line.isEmpty()) {
-                if (line.length() > 50) line = line.substring(0, 50) + "...";
+                if (line.length() > 40) line = line.substring(0, 40) + "...";
                 return line;
             }
         }
-        return "Unknown native load error";
+        return "Unknown error";
     }
 
     private String shortName(String lib) {
