@@ -133,14 +133,28 @@ mkdir -p "$OUT_DIR/$SO_ABI"
 cp "$SO_SRC" "$OUT_DIR/$SO_ABI/libalvr_client_core.so"
 cp "$OUT_DIR/include/alvr_client_core.h" "$OUT_DIR/alvr_client_core.h"
 
-# Best-effort: bundle libc++_shared.so if the NDK provides it (alvr_client_core
-# may be linked against it). Harmless if unused.
+# ---- Bundle libc++_shared.so (REQUIRED by the prebuilt Qiyu SDK .so files) ----
+# The Qiyu VR SDK prebuilts are dynamically linked against libc++_shared.so. If it
+# isn't bundled, loading the Qiyu chain fails with "library ... not found". NDK
+# ships it in a couple of locations depending on version/host, so try them all and
+# WARN loudly if none is found (a silent miss is exactly what bit us before).
 if [ -n "${ANDROID_NDK:-}" ]; then
-  LIBCXX="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
-  if [ -f "$LIBCXX" ]; then
+  LIBCXX_CANDIDATES=(
+    "$ANDROID_NDK/sources/cxx-stl/llvm-libc++/libs/$SO_ABI/libc++_shared.so"
+    "$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+    "$ANDROID_NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+    "$ANDROID_NDK/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+  )
+  LIBCXX=""
+  for c in "${LIBCXX_CANDIDATES[@]}"; do
+    if [ -f "$c" ]; then LIBCXX="$c"; break; fi
+  done
+  if [ -n "$LIBCXX" ]; then
     mkdir -p "$ROOT/app/src/main/jniLibs/$SO_ABI"
     cp "$LIBCXX" "$ROOT/app/src/main/jniLibs/$SO_ABI/libc++_shared.so"
-    echo "==> Bundled libc++_shared.so"
+    echo "==> Bundled libc++_shared.so (from $LIBCXX)"
+  else
+    echo "WARNING: libc++_shared.so NOT found in NDK -- Qiyu SDK native load will likely fail!" >&2
   fi
 fi
 

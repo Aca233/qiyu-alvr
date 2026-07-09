@@ -20,8 +20,8 @@ import android.view.SurfaceView;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -33,6 +33,8 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.util.LinkedList;
 import java.util.concurrent.Semaphore;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class VRActivity extends Activity {
     // NOTE: native libraries are loaded DEFENSIVELY inside onCreate(), not in a
@@ -211,29 +213,33 @@ public class VRActivity extends Activity {
 
     native void setLogFilePath(String path);
 
-    // Load the full native dependency chain in the correct order. Loading each
-    // Qiyu SDK lib explicitly means a failure is attributed to the exact library
-    // (and its missing symbol), giving us a precise diagnosis on-device.
+    // Load the full native dependency chain in the correct order, using absolute
+    // paths inside the app's extracted native lib dir. Loading each lib explicitly
+    // (and libqiyuvrsdkcore's C++ runtime libc++_shared.so FIRST) means a failure is
+    // attributed to the exact library, giving us a precise on-device diagnosis.
     private void loadNativeLibs() {
-        // Qiyu VR SDK chain (bundled in jniLibs). Order matters: each may depend
-        // on the ones listed before it.
-        String[] qiyuChain = {
-                "vrapi",
-                "sxrapi",
-                "qiyivrsdkcore",
-                "ashreader",
-                "qiyuapi",
+        // With android:extractNativeLibs="true" the libs are extracted here.
+        String dir = getApplicationInfo().nativeLibraryDir;
+        // Order matters: libc++_shared.so (C++ runtime the Qiyu prebuilts need)
+        // must come before everything that depends on it.
+        String[] libs = {
+                "libc++_shared.so",
+                "libvrapi.so",
+                "libsxrapi.so",
+                "libqiyuvrsdkcore.so",
+                "libashreader.so",
+                "libqiyuapi.so",
+                "libalvr_client_core.so",
+                "libnative_lib.so",
         };
-        for (String lib : qiyuChain) {
+        for (String lib : libs) {
+            String path = dir + "/" + lib;
             try {
-                System.loadLibrary(lib);
+                System.load(path);
             } catch (Throwable t) {
-                throw new RuntimeException("Failed while loading lib" + lib + ".so", t);
+                throw new RuntimeException("Failed to load native lib: " + path, t);
             }
         }
-        // ALVR Rust core, then our bridge which depends on both.
-        System.loadLibrary("alvr_client_core");
-        System.loadLibrary("native_lib");
     }
 
     @SuppressWarnings("unused")
@@ -283,49 +289,58 @@ public class VRActivity extends Activity {
         }
     }
 
-    // Render the error as a full-screen 2D surface. The Qiyu VR compositor shows a
-    // 2D Android surface split across the two eyes (left eye -> left half of the
-    // screen, right eye -> right half). To guarantee BOTH eyes can read the FULL
-    // message, we draw the same text into the left and right halves of the screen.
+    // The Qiyu VR compositor shows a 2D Android surface ZOOMED/centered, so only
+    // the middle band is visible (left/right/top/bottom edges are cropped). To stay
+    // readable we show ONLY a short, large, centered headline with the key fact
+    // (the missing library or symbol). The full text is saved to a file instead.
     private void showErrorScreen(String msg) {
         writeCrashFile(msg);
 
-        StringBuilder full = new StringBuilder();
-        full.append("=== ALVR Qiyu native error ===\n");
-        full.append("Screenshot this and send it. Do NOT close yet.\n\n");
-        full.append(msg);
+        TextView head = new TextView(this);
+        head.setText(extractKeyFact(msg));
+        head.setTextColor(0xFFFFFF00); // yellow, high contrast on black
+        head.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        head.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        head.setGravity(Gravity.CENTER);
+        head.setPadding(16, 16, 16, 16);
 
-        ScrollView sv = new ScrollView(this);
-        sv.setBackgroundColor(0xFF000000);
-        sv.setFillViewport(true);
+        TextView hint = new TextView(this);
+        hint.setText("Send me this name (or screenshot). Full log saved to file.");
+        hint.setTextColor(0xFFFFFFFF);
+        hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        hint.setGravity(Gravity.CENTER);
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout center = new LinearLayout(this);
+        center.setOrientation(LinearLayout.VERTICAL);
+        center.setGravity(Gravity.CENTER);
+        center.setBackgroundColor(0xFF000000);
+        center.addView(head);
+        center.addView(hint);
+
+        FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(0xFF000000);
-
-        LinearLayout.LayoutParams half = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
-
-        root.addView(makeErrorText(full.toString()), half);
-        root.addView(makeErrorText(full.toString()), half);
-
-        sv.addView(root, new ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER);
+        root.addView(center, flp);
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        setContentView(sv);
+        setContentView(root);
     }
 
-    private TextView makeErrorText(String text) {
-        TextView t = new TextView(this);
-        t.setText(text);
-        t.setTextColor(0xFFFFFFFF);
-        t.setBackgroundColor(0xFF000000);
-        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        t.setTypeface(Typeface.MONOSPACE);
-        t.setPadding(10, 10, 10, 10);
-        t.setGravity(Gravity.TOP | Gravity.START);
-        return t;
+    // Pull the single most useful fact out of the (long) stack trace so it fits in
+    // the visible center of the VR view: the missing library, or the missing symbol.
+    private String extractKeyFact(String msg) {
+        Matcher m1 = Pattern.compile("library \"([^\"]+)\" not found").matcher(msg);
+        if (m1.find()) return "MISSING LIBRARY:\n" + m1.group(1);
+        Matcher m2 = Pattern.compile("cannot locate symbol \"([^\"]+)\"").matcher(msg);
+        if (m2.find()) return "MISSING SYMBOL:\n" + m2.group(1);
+        for (String line : msg.split("\n")) {
+            line = line.trim();
+            if (!line.isEmpty()) return line;
+        }
+        return "Unknown native load error";
     }
 
     // Persist the error to locations that are always writable without extra
