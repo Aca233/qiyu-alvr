@@ -11,6 +11,7 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.graphics.Typeface;
+import android.speech.tts.TextToSpeech;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -32,6 +33,7 @@ import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.util.LinkedList;
+import java.util.Locale;
 import java.util.concurrent.Semaphore;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -78,6 +80,12 @@ public class VRActivity extends Activity {
     Handler mRenderingHandler;
     HandlerThread mRenderingHandlerThread;
     Surface mScreenSurface;
+
+    // TextToSpeech for speaking errors aloud -- in VR the compositor crops 2D text
+    // so aggressively that reading a multi-word message is nearly impossible. Hearing
+    // it is the only reliable channel. Lazy-init on first error.
+    TextToSpeech mTts;
+    boolean mTtsReady = false;
 
     // Cache method references for performance reasons
     final Runnable mRenderRunnable = this::render;
@@ -213,31 +221,47 @@ public class VRActivity extends Activity {
 
     native void setLogFilePath(String path);
 
-    // Load the full native dependency chain in the correct order, using absolute
-    // paths inside the app's extracted native lib dir. Loading each lib explicitly
-    // (and libqiyuvrsdkcore's C++ runtime libc++_shared.so FIRST) means a failure is
-    // attributed to the exact library, giving us a precise on-device diagnosis.
+    // Load the full native dependency chain in CORRECT topological order,
+    // derived from the actual ELF DT_NEEDED graph (parsed via tools/elf_needed.py):
+    //
+    //   libvrapi.so            -> system libs only
+    //   libashreader.so        -> system libs only (uses libstdc++.so, NOT libc++_shared)
+    //   libsxrapi.so           -> system libs only
+    //   libqiyivrsdkcore.so    -> NEEDS libsxrapi.so + libashreader.so  (must load AFTER both!)
+    //   libqiyuapi.so          -> NEEDS libqiyivrsdkcore.so + libsxrapi.so
+    //   libalvr_client_core.so -> Rust core (may want libc++_shared)
+    //   libnative_lib.so       -> our bridge, needs all above
+    //
+    // CRITICAL: libashreader.so MUST be loaded BEFORE libqiyivrsdkcore.so, because
+    // qiyivrsdkcore has DT_NEEDED libashreader.so, and the Android linker does NOT
+    // search the app's nativeLibraryDir for bare-name deps -- only already-loaded
+    // libs and system paths. Loading in the wrong order = "library not found" cascade.
     private void loadNativeLibs() {
-        // With android:extractNativeLibs="true" the libs are extracted here.
         String dir = getApplicationInfo().nativeLibraryDir;
-        // Order matters: libc++_shared.so (C++ runtime the Qiyu prebuilts need)
-        // must come before everything that depends on it.
-        String[] libs = {
-                "libc++_shared.so",
+
+        // libc++_shared.so is OPTIONAL: the Qiyu prebuilts use libstdc++.so (system),
+        // not libc++_shared; only the Rust core *might* need it. Try it, don't fail.
+        try {
+            System.load(dir + "/libc++_shared.so");
+        } catch (Throwable ignored) {
+            // not packaged or not needed -- continue
+        }
+
+        // Required chain in dependency order.
+        String[] required = {
                 "libvrapi.so",
+                "libashreader.so",        // <-- BEFORE qiyivrsdkcore (it's a dep)
                 "libsxrapi.so",
-                "libqiyuvrsdkcore.so",
-                "libashreader.so",
+                "libqiyivrsdkcore.so",
                 "libqiyuapi.so",
                 "libalvr_client_core.so",
                 "libnative_lib.so",
         };
-        for (String lib : libs) {
-            String path = dir + "/" + lib;
+        for (String lib : required) {
             try {
-                System.load(path);
+                System.load(dir + "/" + lib);
             } catch (Throwable t) {
-                throw new RuntimeException("Failed to load native lib: " + path, t);
+                throw new RuntimeException("Failed to load " + lib, t);
             }
         }
     }
@@ -290,24 +314,31 @@ public class VRActivity extends Activity {
     }
 
     // The Qiyu VR compositor shows a 2D Android surface ZOOMED/centered, so only
-    // the middle band is visible (left/right/top/bottom edges are cropped). To stay
-    // readable we show ONLY a short, large, centered headline with the key fact
-    // (the missing library or symbol). The full text is saved to a file instead.
+    // the middle band is visible (left/right/top/bottom edges are cropped). We show
+    // ONLY a short, large, centered headline with the key fact (the missing library
+    // or symbol), AND speak it aloud via TTS (the only reliable channel in VR).
+    // The full text is also saved to a file.
     private void showErrorScreen(String msg) {
         writeCrashFile(msg);
 
+        String fact = extractKeyFact(msg);
+
+        // Speak the error aloud so the user can hear it even if the VR compositor
+        // crops the on-screen text beyond readability.
+        speak(fact);
+
         TextView head = new TextView(this);
-        head.setText(extractKeyFact(msg));
+        head.setText(fact);
         head.setTextColor(0xFFFFFF00); // yellow, high contrast on black
-        head.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        head.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
         head.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         head.setGravity(Gravity.CENTER);
         head.setPadding(16, 16, 16, 16);
 
         TextView hint = new TextView(this);
-        hint.setText("Send me this name (or screenshot). Full log saved to file.");
+        hint.setText("Listen for spoken error. Full log saved to file.");
         hint.setTextColor(0xFFFFFFFF);
-        hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         hint.setGravity(Gravity.CENTER);
 
         LinearLayout center = new LinearLayout(this);
@@ -331,16 +362,64 @@ public class VRActivity extends Activity {
 
     // Pull the single most useful fact out of the (long) stack trace so it fits in
     // the visible center of the VR view: the missing library, or the missing symbol.
+    // Handles several Android linker error phrasings across versions.
     private String extractKeyFact(String msg) {
-        Matcher m1 = Pattern.compile("library \"([^\"]+)\" not found").matcher(msg);
-        if (m1.find()) return "MISSING LIBRARY:\n" + m1.group(1);
-        Matcher m2 = Pattern.compile("cannot locate symbol \"([^\"]+)\"").matcher(msg);
-        if (m2.find()) return "MISSING SYMBOL:\n" + m2.group(1);
+        // "library \"libfoo.so\" not found"
+        Matcher m = Pattern.compile("library \"([^\"]+)\" not found").matcher(msg);
+        if (m.find()) return "MISSING LIB:\n" + shortName(m.group(1));
+        // "cannot locate symbol \"foo\""
+        m = Pattern.compile("cannot locate symbol \"([^\"]+)\"").matcher(msg);
+        if (m.find()) return "MISSING SYMBOL:\n" + m.group(1);
+        // "cannot load library \"libfoo.so\""
+        m = Pattern.compile("cannot load library \"([^\"]+)\"").matcher(msg);
+        if (m.find()) return "MISSING LIB:\n" + shortName(m.group(1));
+        // "needed by ... libfoo.so" -- the lib that has the unmet dependency
+        m = Pattern.compile("needed by [^ ]*lib([a-z0-9_]+)\\.so").matcher(msg);
+        if (m.find()) return "DEP MISSING FOR:\nlib" + m.group(1) + ".so";
+        // any ".so" path quoted
+        m = Pattern.compile("\"([^\"]+\\.so)\"").matcher(msg);
+        if (m.find()) return "LIB ERROR:\n" + shortName(m.group(1));
+        // fallback: first non-empty line, truncated
         for (String line : msg.split("\n")) {
             line = line.trim();
-            if (!line.isEmpty()) return line;
+            if (!line.isEmpty()) {
+                if (line.length() > 50) line = line.substring(0, 50) + "...";
+                return line;
+            }
         }
         return "Unknown native load error";
+    }
+
+    private String shortName(String lib) {
+        int i = lib.lastIndexOf('/');
+        return i >= 0 ? lib.substring(i + 1) : lib;
+    }
+
+    // Lazy-init TextToSpeech and speak the given text. In VR, on-screen text is
+    // often cropped by the compositor, so audio is the most reliable error channel.
+    private void speak(String text) {
+        try {
+            if (mTts == null) {
+                mTts = new TextToSpeech(this, status -> {
+                    mTtsReady = (status == TextToSpeech.SUCCESS);
+                    if (mTtsReady) {
+                        try { mTts.setLanguage(Locale.US); } catch (Exception ignored) {}
+                        doSpeak(text);
+                    }
+                });
+            } else if (mTtsReady) {
+                doSpeak(text);
+            }
+        } catch (Exception ignored) {
+            // TTS not critical; ignore failures.
+        }
+    }
+
+    private void doSpeak(String text) {
+        try {
+            mTts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "alvr_err");
+        } catch (Exception ignored) {
+        }
     }
 
     // Persist the error to locations that are always writable without extra
