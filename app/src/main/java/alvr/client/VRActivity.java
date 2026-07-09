@@ -1,7 +1,6 @@
 package alvr.client;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -11,12 +10,19 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.graphics.Typeface;
 import android.util.Log;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 
@@ -83,13 +89,17 @@ public class VRActivity extends Activity {
         //    No USB / wireless-debug / file-manager needed.
         maybeShowPreviousCrash();
 
-        // 2) Load native libs defensively. alvr_client_core (Rust) first, then our
-        //    native_lib which depends on it. Any failure is caught and shown.
+        // 2) Load native libs defensively, loading the Qiyu SDK dependency chain
+        //    explicitly so any failure names the EXACT missing library/symbol
+        //    instead of surfacing deep inside native_lib. Any failure is caught.
         try {
-            System.loadLibrary("alvr_client_core");
-            System.loadLibrary("native_lib");
+            loadNativeLibs();
         } catch (Throwable t) {
-            showErrorDialog("Native library load failed:\n\n" + Log.getStackTraceString(t), true);
+            String libs = "Native library load failed.\n"
+                    + "If the message says \"cannot locate symbol\", that symbol is missing from\n"
+                    + "the named .so (version/ABI mismatch or packaging issue).\n"
+                    + "If it says \"library ... not found\", that .so is not packaged in the APK.\n\n";
+            showErrorScreen(libs + "Error detail:\n\n" + Log.getStackTraceString(t));
             return;
         }
 
@@ -201,6 +211,31 @@ public class VRActivity extends Activity {
 
     native void setLogFilePath(String path);
 
+    // Load the full native dependency chain in the correct order. Loading each
+    // Qiyu SDK lib explicitly means a failure is attributed to the exact library
+    // (and its missing symbol), giving us a precise diagnosis on-device.
+    private void loadNativeLibs() {
+        // Qiyu VR SDK chain (bundled in jniLibs). Order matters: each may depend
+        // on the ones listed before it.
+        String[] qiyuChain = {
+                "vrapi",
+                "sxrapi",
+                "qiyivrsdkcore",
+                "ashreader",
+                "qiyuapi",
+        };
+        for (String lib : qiyuChain) {
+            try {
+                System.loadLibrary(lib);
+            } catch (Throwable t) {
+                throw new RuntimeException("Failed while loading lib" + lib + ".so", t);
+            }
+        }
+        // ALVR Rust core, then our bridge which depends on both.
+        System.loadLibrary("alvr_client_core");
+        System.loadLibrary("native_lib");
+    }
+
     @SuppressWarnings("unused")
     public void onStreamStart() {
         mRenderingHandler.post(this::onStreamStartNative);
@@ -226,8 +261,8 @@ public class VRActivity extends Activity {
         if (scan == null) return;
         if (scan.toLowerCase().contains("clean exit")) return; // previous run exited fine
         String tail = readTail(f, 200);
-        showErrorDialog("Previous run did not exit cleanly. Last log:\n\n"
-                + (tail != null ? tail : scan), false);
+        showErrorScreen("PREVIOUS RUN DID NOT EXIT CLEANLY. Last log:\n\n"
+                + (tail != null ? tail : scan));
     }
 
     private String readTail(File f, int lines) {
@@ -248,28 +283,72 @@ public class VRActivity extends Activity {
         }
     }
 
-    private void showErrorDialog(String msg, boolean finishOnDismiss) {
-        // Best-effort: also drop a copy where a headset file-manager can reach it,
-        // in case the VR compositor hides this Android dialog.
-        try {
-            File dump = new File(Environment.getExternalStoragePublicDirectory(
-                    Environment.DIRECTORY_DOWNLOADS), "alvr_crash.txt");
-            try (FileWriter w = new FileWriter(dump, true)) {
-                w.write(msg);
-                w.write("\n\n");
-            }
-        } catch (IOException ignored) {
-            // scoped storage may block this on some API levels; ignore.
-        }
+    // Render the error as a full-screen 2D surface. The Qiyu VR compositor shows a
+    // 2D Android surface split across the two eyes (left eye -> left half of the
+    // screen, right eye -> right half). To guarantee BOTH eyes can read the FULL
+    // message, we draw the same text into the left and right halves of the screen.
+    private void showErrorScreen(String msg) {
+        writeCrashFile(msg);
 
-        AlertDialog.Builder b = new AlertDialog.Builder(this)
-                .setTitle("ALVR Qiyu - debug info")
-                .setMessage(msg)
-                .setPositiveButton("OK", (d, w) -> {
-                    d.dismiss();
-                    if (finishOnDismiss) finish();
-                });
-        // Run on the main looper in case we're on the rendering thread.
-        runOnUiThread(b::show);
+        StringBuilder full = new StringBuilder();
+        full.append("=== ALVR Qiyu native error ===\n");
+        full.append("Screenshot this and send it. Do NOT close yet.\n\n");
+        full.append(msg);
+
+        ScrollView sv = new ScrollView(this);
+        sv.setBackgroundColor(0xFF000000);
+        sv.setFillViewport(true);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.HORIZONTAL);
+        root.setBackgroundColor(0xFF000000);
+
+        LinearLayout.LayoutParams half = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
+
+        root.addView(makeErrorText(full.toString()), half);
+        root.addView(makeErrorText(full.toString()), half);
+
+        sv.addView(root, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        setContentView(sv);
+    }
+
+    private TextView makeErrorText(String text) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextColor(0xFFFFFFFF);
+        t.setBackgroundColor(0xFF000000);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        t.setTypeface(Typeface.MONOSPACE);
+        t.setPadding(10, 10, 10, 10);
+        t.setGravity(Gravity.TOP | Gravity.START);
+        return t;
+    }
+
+    // Persist the error to locations that are always writable without extra
+    // permissions, so the user can pull it when a USB/cable is available later.
+    private void writeCrashFile(String msg) {
+        File[] candidates = new File[]{
+                new File(getExternalFilesDir(null), "alvr_crash.txt"), // /sdcard/Android/data/<pkg>/files
+                new File(getFilesDir(), "alvr_crash.txt"),             // /data/data/<pkg>/files
+                new File(Environment.getExternalStoragePublicDirectory(
+                        Environment.DIRECTORY_DOWNLOADS), "alvr_crash.txt"),
+        };
+        for (File f : candidates) {
+            if (f == null) continue;
+            try {
+                File parent = f.getParentFile();
+                if (parent != null) parent.mkdirs();
+                try (FileWriter w = new FileWriter(f, true)) {
+                    w.write(msg);
+                    w.write("\n\n--------------------------------------------------\n\n");
+                }
+            } catch (IOException ignored) {
+                // best effort
+            }
+        }
     }
 }
