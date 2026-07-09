@@ -388,9 +388,9 @@ void updateBinary(uint64_t path, bool value) {
 
     AlvrButtonValue b{};
     b.tag = ALVR_BUTTON_VALUE_BINARY;
-    b.body.BINARY._0 = value;
+    b.BINARY._0 = value;
 
-    bool changed = (stateRef->tag != ALVR_BUTTON_VALUE_BINARY) || (stateRef->body.BINARY._0 != value);
+    bool changed = (stateRef->tag != ALVR_BUTTON_VALUE_BINARY) || (stateRef->BINARY._0 != value);
     if (changed) {
         *stateRef = b;
         alvr_send_button(path, b);
@@ -402,10 +402,10 @@ void updateScalar(uint64_t path, float value) {
 
     AlvrButtonValue b{};
     b.tag = ALVR_BUTTON_VALUE_SCALAR;
-    b.body.SCALAR._0 = value;
+    b.SCALAR._0 = value;
 
     bool changed = (stateRef->tag != ALVR_BUTTON_VALUE_SCALAR) ||
-                   (fabsf(stateRef->body.SCALAR._0 - value) > BUTTON_EPS);
+                   (fabsf(stateRef->SCALAR._0 - value) > BUTTON_EPS);
     if (changed) {
         *stateRef = b;
         alvr_send_button(path, b);
@@ -694,7 +694,7 @@ void eventsThread() {
         AlvrEvent event;
         while (alvr_poll_event(&event)) {
             if (event.tag == ALVR_EVENT_HAPTICS) {
-                auto haptics = event.body.HAPTICS;
+                auto haptics = event.HAPTICS;
                 int curHandIndex = (haptics.device_id == RIGHT_CONTROLLER_HAPTICS_ID ? 0 : 1);
                 auto &s = CTX.hapticsState[curHandIndex];
                 s.startUs = 0;
@@ -704,10 +704,10 @@ void eventsThread() {
                 s.fresh = true;
                 s.buffered = false;
             } else if (event.tag == ALVR_EVENT_STREAMING_STARTED) {
-                CTX.streamConfig.view_width = event.body.STREAMING_STARTED.view_width;
-                CTX.streamConfig.view_height = event.body.STREAMING_STARTED.view_height;
-                CTX.streamConfig.refresh_rate_hint = event.body.STREAMING_STARTED.refresh_rate_hint;
-                CTX.streamConfig.enable_foveated_encoding = event.body.STREAMING_STARTED.enable_foveated_encoding;
+                CTX.streamConfig.view_width = event.STREAMING_STARTED.view_width;
+                CTX.streamConfig.view_height = event.STREAMING_STARTED.view_height;
+                CTX.streamConfig.refresh_rate_hint = event.STREAMING_STARTED.refresh_rate_hint;
+                CTX.streamConfig.enable_foveated_encoding = event.STREAMING_STARTED.enable_foveated_encoding;
                 java.Env->CallVoidMethod(java.ActivityObject, onStreamStartMethod);
             } else if (event.tag == ALVR_EVENT_STREAMING_STOPPED) {
                 java.Env->CallVoidMethod(java.ActivityObject, onStreamStopMethod);
@@ -719,7 +719,7 @@ void eventsThread() {
                     alvr_get_decoder_config((char *) buffer.data());
 
                     AlvrDecoderConfig cfg{};
-                    cfg.codec = event.body.DECODER_CONFIG.codec;
+                    cfg.codec = event.DECODER_CONFIG.codec;
                     cfg.force_software_decoder = false;
                     cfg.max_buffering_frames = 0.0f;
                     cfg.buffering_history_weight = 0.0f;
@@ -885,7 +885,7 @@ Java_alvr_client_VRActivity_onStreamStartNative(JNIEnv *_env, jobject _context) 
     AlvrStreamConfig config{};
     config.view_resolution_width = CTX.streamConfig.view_width;
     config.view_resolution_height = CTX.streamConfig.view_height;
-    config.swapchain_textures = (uint32_t **) textureHandles;
+    config.swapchain_textures = (const uint32_t **) textureHandles;
     config.swapchain_length = (uint32_t) textureHandlesBuffer[0].size();
     config.enable_foveation = CTX.streamConfig.enable_foveated_encoding;
     config.foveation_center_size_x = 1.0f;
