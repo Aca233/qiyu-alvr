@@ -52,11 +52,12 @@ public class VRActivity extends Activity {
         public void surfaceCreated(@NonNull final SurfaceHolder holder) {
             Log.i(TAG, "surfaceCreated");
             mScreenSurface = holder.getSurface();
-            // Convert the Java Surface to ANativeWindow immediately. Dream Pro
-            // destroys the Java presentation Surface a few milliseconds later,
-            // before the rendering thread finishes native initialization.
-            setSurfaceNative(mScreenSurface);
-            maybeResume();
+            if (!mNativeResumed) {
+                mNativeResumed = true;
+                // Enter Qiyu VR immediately while the Surface is valid. Waiting
+                // for ALVR/wgpu initialization lets Dream Pro destroy it first.
+                onResumeNative(mScreenSurface);
+            }
         }
 
         @Override
@@ -243,8 +244,6 @@ public class VRActivity extends Activity {
     native void destroyNative();
 
     native void onResumeNative(Surface screenSurface);
-
-    native void setSurfaceNative(Surface screenSurface);
 
     native void onPauseNative();
 
