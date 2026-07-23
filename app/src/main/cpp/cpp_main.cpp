@@ -265,12 +265,18 @@ public:
     jobject context = nullptr;
 
     Render_EGL egl{};
+    EGLDisplay graphicsDisplay = EGL_NO_DISPLAY;
+    EGLContext graphicsContext = EGL_NO_CONTEXT;
+    EGLSurface graphicsDrawSurface = EGL_NO_SURFACE;
+    EGLSurface graphicsReadSurface = EGL_NO_SURFACE;
 
     ANativeWindow *window = nullptr;
 
     bool running = false;
     bool streaming = false;
     bool decoderConfigured = false;
+    bool lobbyTargetsInitialized = false;
+    bool streamTargetsInitialized = false;
     std::thread eventsThread;
 
     uint32_t recommendedViewWidth = 1;
@@ -903,6 +909,10 @@ Java_alvr_client_VRActivity_initializeNative(JNIEnv *env, jobject context) {
     info("[trace] calling alvr_initialize_opengl");
     alvr_initialize_opengl();
     info("[trace] alvr_initialize_opengl done");
+    CTX.graphicsDisplay = eglGetCurrentDisplay();
+    CTX.graphicsContext = eglGetCurrentContext();
+    CTX.graphicsDrawSurface = eglGetCurrentSurface(EGL_DRAW);
+    CTX.graphicsReadSurface = eglGetCurrentSurface(EGL_READ);
     traceGraphicsState("after alvr_initialize_opengl");
     qiyu_PostSetEyeBufferSize(CTX.recommendedViewWidth, CTX.recommendedViewHeight);
 
@@ -924,6 +934,11 @@ Java_alvr_client_VRActivity_destroyNative(JNIEnv *_env, jobject _context) {
 extern "C" JNIEXPORT void JNICALL Java_alvr_client_VRActivity_onResumeNative(
         JNIEnv *_env, jobject _context, jobject surface) {
     auto java = getOvrJava();
+
+    if (CTX.lobbyTargetsInitialized) {
+        error("Ignoring duplicate onResumeNative call while lobby targets are active");
+        return;
+    }
 
     CTX.window = ANativeWindow_fromSurface(java.Env, surface);
 
@@ -962,6 +977,7 @@ extern "C" JNIEXPORT void JNICALL Java_alvr_client_VRActivity_onResumeNative(
         }
         CTX.lobbyBuffers[eye].index = 0;
     }
+    CTX.lobbyTargetsInitialized = true;
     const int32_t *textureHandles[2] = {&textureHandlesBuffer[0][0], &textureHandlesBuffer[1][0]};
     qiyu_PostSetEyeBufferSize(CTX.recommendedViewWidth, CTX.recommendedViewHeight);
 
@@ -985,6 +1001,11 @@ Java_alvr_client_VRActivity_onStreamStartNative(JNIEnv *_env, jobject _context) 
     CTX.refreshRate = CTX.streamConfig.refresh_rate_hint;
     CTX.decoderConfigured = false;
 
+    if (CTX.streamTargetsInitialized) {
+        error("Ignoring duplicate stream start while stream targets are active");
+        return;
+    }
+
     // Build the eye swapchain texture handles for the stream buffers.
     std::vector<uint32_t> textureHandlesBuffer[2];
     for (int eye = 0; eye < 2; eye++) {
@@ -997,6 +1018,7 @@ Java_alvr_client_VRActivity_onStreamStartNative(JNIEnv *_env, jobject _context) 
         }
         CTX.streamBuffers[eye].index = 0;
     }
+    CTX.streamTargetsInitialized = true;
     const uint32_t *textureHandles[2] = {textureHandlesBuffer[0].data(), textureHandlesBuffer[1].data()};
     qiyu_PostSetEyeBufferSize(CTX.streamConfig.view_width, CTX.streamConfig.view_height);
 
@@ -1056,10 +1078,13 @@ Java_alvr_client_VRActivity_onStreamStopNative(JNIEnv *_env, jobject _context) {
 
     alvr_destroy_decoder();
 
-    for (int eye = 0; eye < 2; eye++) {
-        for (int index = 0; index < NUM_EYE_BUFFERS_; index++) {
-            CTX.streamBuffers[eye].eyeTarget[index].Release();
+    if (CTX.streamTargetsInitialized) {
+        for (int eye = 0; eye < 2; eye++) {
+            for (int index = 0; index < NUM_EYE_BUFFERS_; index++) {
+                CTX.streamBuffers[eye].eyeTarget[index].Release();
+            }
         }
+        CTX.streamTargetsInitialized = false;
     }
 }
 
@@ -1074,10 +1099,13 @@ Java_alvr_client_VRActivity_onPauseNative(JNIEnv *_env, jobject _context) {
         CTX.running = false;
         CTX.eventsThread.join();
     }
-    for (int eye = 0; eye < 2; eye++) {
-        for (int index = 0; index < NUM_EYE_BUFFERS_; index++) {
-            CTX.lobbyBuffers[eye].eyeTarget[index].Release();
+    if (CTX.lobbyTargetsInitialized) {
+        for (int eye = 0; eye < 2; eye++) {
+            for (int index = 0; index < NUM_EYE_BUFFERS_; index++) {
+                CTX.lobbyBuffers[eye].eyeTarget[index].Release();
+            }
         }
+        CTX.lobbyTargetsInitialized = false;
     }
 
     qiyu_EndVR();
@@ -1092,6 +1120,24 @@ extern "C" JNIEXPORT void JNICALL
 Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
     if (!CTX.running || CTX.window == nullptr) {
         return;
+    }
+
+    if (eglGetCurrentContext() != CTX.graphicsContext) {
+        if (eglMakeCurrent(
+                CTX.graphicsDisplay,
+                CTX.graphicsDrawSurface,
+                CTX.graphicsReadSurface,
+                CTX.graphicsContext) == EGL_FALSE) {
+            if (CTX.ovrFrameIndex < 5 || CTX.ovrFrameIndex % 120 == 0) {
+                __android_log_print(
+                    ANDROID_LOG_ERROR,
+                    "ALVR_QIYU_TRACE",
+                    "render eglMakeCurrent failed frame=%llu error=0x%x",
+                    (unsigned long long) CTX.ovrFrameIndex,
+                    eglGetError());
+            }
+            return;
+        }
     }
     double displayTime;
     qiyu_HeadPoseState tracking;
