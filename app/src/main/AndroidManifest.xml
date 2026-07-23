@@ -27,13 +27,18 @@
         android:largeHeap="true"
         android:requestLegacyExternalStorage="true">
 
-        <!-- VR mode metadata. Qiyu Dream is built on a VIVE Wave-derived runtime,
-             so we declare the Wave VR application mode / category so the headset's
-             launcher recognizes this as a VR app. If your Qiyu firmware uses a
-             different category, adjust the value below. -->
         <meta-data
-            android:name="com.htc.vr.application.mode"
+            android:name="com.samsung.android.vr.application.mode"
             android:value="vr_only" />
+        <meta-data
+            android:name="com.oculus.supportedDevices"
+            android:value="quest|quest2" />
+        <meta-data
+            android:name="com.oculus.vr.focusaware"
+            android:value="true" />
+        <meta-data
+            android:name="native-sdk-version"
+            android:value="1.0.0" />
 
         <activity
             android:name="alvr.client.VRActivity"
@@ -47,8 +52,6 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
-                <!-- VR launch category (VIVE Wave / Qiyu) -->
-                <category android:name="com.htc.vr.intent.category.VR" />
             </intent-filter>
         </activity>
     </application>
