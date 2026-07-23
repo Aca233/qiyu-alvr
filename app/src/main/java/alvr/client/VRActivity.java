@@ -50,12 +50,14 @@ public class VRActivity extends Activity {
     class RenderingCallbacks implements SurfaceHolder.Callback {
         @Override
         public void surfaceCreated(@NonNull final SurfaceHolder holder) {
+            Log.i(TAG, "surfaceCreated");
             mScreenSurface = holder.getSurface();
             maybeResume();
         }
 
         @Override
         public void surfaceChanged(@NonNull SurfaceHolder holder, int _fmt, int _w, int _h) {
+            Log.i(TAG, "surfaceChanged " + _w + "x" + _h);
             // Android normally sends surfaceChanged immediately after
             // surfaceCreated for the same Surface. Restarting native VR here
             // queued pause/resume back-to-back, which detached the EGL context
@@ -81,6 +83,7 @@ public class VRActivity extends Activity {
 
     boolean mResumed = false;
     boolean mNativeResumed = false;
+    boolean mNativeInitialized = false;
     Handler mRenderingHandler;
     HandlerThread mRenderingHandlerThread;
     Surface mScreenSurface;
@@ -132,7 +135,13 @@ public class VRActivity extends Activity {
         mRenderingHandlerThread = new HandlerThread("Rendering thread");
         mRenderingHandlerThread.start();
         mRenderingHandler = new Handler(mRenderingHandlerThread.getLooper());
-        mRenderingHandler.post(this::initializeNative);
+        mRenderingHandler.post(() -> {
+            initializeNative();
+            synchronized (VRActivity.this) {
+                mNativeInitialized = true;
+            }
+            runOnUiThread(this::maybeResume);
+        });
 
         SurfaceHolder holder = surfaceView.getHolder();
         holder.addCallback(new RenderingCallbacks());
@@ -171,12 +180,17 @@ public class VRActivity extends Activity {
     protected void onResume() {
         super.onResume();
 
+        Log.i(TAG, "onResume");
         mResumed = true;
         maybeResume();
     }
 
     synchronized void maybeResume() {
-        if (mResumed && mScreenSurface != null && !mNativeResumed) {
+        Log.i(TAG, "maybeResume resumed=" + mResumed
+                + " surface=" + (mScreenSurface != null)
+                + " native=" + mNativeResumed
+                + " initialized=" + mNativeInitialized);
+        if (mResumed && mScreenSurface != null && !mNativeResumed && mNativeInitialized) {
             final Surface surface = mScreenSurface;
             mNativeResumed = true;
             mRenderingHandler.post(() -> {
