@@ -941,12 +941,15 @@ extern "C" JNIEXPORT void JNICALL Java_alvr_client_VRActivity_onResumeNative(
     }
 
     CTX.window = ANativeWindow_fromSurface(java.Env, surface);
+    if (CTX.window == nullptr) {
+        error("ANativeWindow_fromSurface returned null");
+        return;
+    }
 
     info("Entering VR mode.");
 
     if (!qiyu_StartVR(CTX.window, PL_System, PL_System)) {
         error("qiyu_StartVR failed - aborting resume to avoid GPU hang");
-        ANativeWindow_release(CTX.window);
         CTX.window = nullptr;
         return;
     }
@@ -1110,9 +1113,9 @@ Java_alvr_client_VRActivity_onPauseNative(JNIEnv *_env, jobject _context) {
 
     qiyu_EndVR();
 
-    if (CTX.window != nullptr) {
-        ANativeWindow_release(CTX.window);
-    }
+    // qiyu_StartVR takes ownership of the ANativeWindow reference on Dream Pro.
+    // Releasing it from the app causes a null dereference in ANativeWindow_release
+    // after the Qiyu compositor has already consumed the Surface.
     CTX.window = nullptr;
 }
 
