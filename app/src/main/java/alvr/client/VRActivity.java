@@ -94,6 +94,12 @@ public class VRActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // Android requires window features to be requested before any code can
+        // display a fallback/error view through setContentView().
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
+
         // 1) Surface any crash from the PREVIOUS run. The C++ logger writes to our
         //    private dir; on the next launch we read the tail and show it on-screen.
         //    No USB / wireless-debug / file-manager needed.
@@ -115,10 +121,6 @@ public class VRActivity extends Activity {
 
         // 4) Point the C++ file logger at our private, always-writable directory.
         setLogFilePath(new File(getFilesDir(), LOG_FILE_NAME).getAbsolutePath());
-
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
-        requestWindowFeature(Window.FEATURE_NO_TITLE);
 
         setContentView(R.layout.activity_main);
         SurfaceView surfaceView = findViewById(R.id.surfaceview);
