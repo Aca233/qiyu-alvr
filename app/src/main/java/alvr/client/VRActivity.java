@@ -68,8 +68,11 @@ public class VRActivity extends Activity {
 
         @Override
         public void surfaceDestroyed(@NonNull SurfaceHolder holder) {
-            maybePause();
-            mScreenSurface = null;
+            // Dream Pro transiently destroys the Android presentation surface
+            // while transferring ownership to the Qiyu compositor. Keep the
+            // Surface reference and native VR session alive; treating this as
+            // a real app shutdown stops submissions after one or two frames.
+            Log.i(TAG, "surfaceDestroyed (owned by Qiyu; keeping VR active)");
         }
     }
 
@@ -194,7 +197,7 @@ public class VRActivity extends Activity {
                 + " surface=" + (mScreenSurface != null)
                 + " native=" + mNativeResumed
                 + " initialized=" + mNativeInitialized);
-        if (mScreenSurface != null && !mNativeResumed && mNativeInitialized) {
+        if (mScreenSurface != null && !mNativeResumed) {
             final Surface surface = mScreenSurface;
             mNativeResumed = true;
             mRenderingHandler.post(() -> {
