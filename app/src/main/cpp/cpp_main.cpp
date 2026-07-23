@@ -257,6 +257,7 @@ public:
 
     bool running = false;
     bool streaming = false;
+    bool decoderConfigured = false;
     std::thread eventsThread;
 
     uint32_t recommendedViewWidth = 1;
@@ -773,6 +774,16 @@ void eventsThread() {
             } else if (event.tag == ALVR_EVENT_STREAMING_STOPPED) {
                 java.Env->CallVoidMethod(java.ActivityObject, onStreamStopMethod);
             } else if (event.tag == ALVR_EVENT_DECODER_CONFIG) {
+                // ALVR can retransmit decoder configuration packets while the
+                // connection is being established. The v20 C API explicitly
+                // requires clients to ignore all configs after the first one
+                // until the next reconnection; recreating MediaCodec leaks its
+                // ImageReader and quickly exhausts Dream's hardware decoder.
+                if (CTX.decoderConfigured) {
+                    info("Ignoring duplicate decoder configuration");
+                    continue;
+                }
+
                 // The server told us the codec + decoder config NAL; create the decoder.
                 uint64_t size = alvr_get_decoder_config(nullptr);
                 if (size > 0) {
@@ -789,6 +800,7 @@ void eventsThread() {
                     cfg.config_buffer = buffer.data();
                     cfg.config_buffer_size = size;
                     alvr_create_decoder(cfg);
+                    CTX.decoderConfigured = true;
                     info("Decoder created (codec %d)", (int) cfg.codec);
                 }
             }
@@ -939,6 +951,7 @@ Java_alvr_client_VRActivity_onStreamStartNative(JNIEnv *_env, jobject _context) 
     auto java = getOvrJava();
 
     CTX.refreshRate = CTX.streamConfig.refresh_rate_hint;
+    CTX.decoderConfigured = false;
 
     // Build the eye swapchain texture handles for the stream buffers.
     std::vector<uint32_t> textureHandlesBuffer[2];
@@ -1007,6 +1020,7 @@ Java_alvr_client_VRActivity_onStreamStartNative(JNIEnv *_env, jobject _context) 
 extern "C" JNIEXPORT void JNICALL
 Java_alvr_client_VRActivity_onStreamStopNative(JNIEnv *_env, jobject _context) {
     CTX.streaming = false;
+    CTX.decoderConfigured = false;
 
     alvr_destroy_decoder();
 
