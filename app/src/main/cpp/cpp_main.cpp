@@ -1079,21 +1079,28 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
     if (CTX.streaming) {
         uint64_t timestampNs = 0;
         void *streamHardwareBuffer = nullptr;
-        if (!alvr_get_frame(&timestampNs, &streamHardwareBuffer)) {
-            return;
-        }
+        const bool hasDecodedFrame = alvr_get_frame(&timestampNs, &streamHardwareBuffer);
 
-        // Register this frame with the compositor and send predicted view params.
-        AlvrViewParams predictedViewParams[2];
-        alvr_report_compositor_start(timestampNs, predictedViewParams);
-        alvr_send_view_params(predictedViewParams);
+        // Keep submitting Qiyu frames while waiting for the first decoded image.
+        // The stock v20 OpenXR client renders a null hardware buffer in this case
+        // instead of returning early. Returning early leaves the Qiyu compositor
+        // with no submitted layer at all ("No valid frame to warp") and can also
+        // stall stream startup on runtimes that expect a continuous frame loop.
+        if (hasDecodedFrame) {
+            // Register this frame with the compositor and send predicted view params.
+            AlvrViewParams predictedViewParams[2];
+            alvr_report_compositor_start(timestampNs, predictedViewParams);
+            alvr_send_view_params(predictedViewParams);
+        }
 
         updateHapticsState();
 
+        // Fall back to a fresh pose while the decoder has not yielded a frame.
+        tracking = qiyu_PredictHeadPose(qiyu_PredictDisplayTime());
         {
             std::lock_guard<std::mutex> lock(CTX.trackingFrameMutex);
             for (auto &pair: CTX.trackingFrameMap) {
-                if (pair.first <= timestampNs) {
+                if (hasDecodedFrame && pair.first <= timestampNs) {
                     tracking = pair.second;
                     break;
                 }
@@ -1121,8 +1128,10 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
         qiyu_EndEye(false, EYE_Left, TT_Texture);
         qiyu_EndEye(false, EYE_Right, TT_Texture);
 
-        float vsyncQueueNs = qiyu_PredictDisplayTime() * 1e6f;
-        alvr_report_submit(timestampNs, (uint64_t) vsyncQueueNs);
+        if (hasDecodedFrame) {
+            float vsyncQueueNs = qiyu_PredictDisplayTime() * 1e6f;
+            alvr_report_submit(timestampNs, (uint64_t) vsyncQueueNs);
+        }
 
         for (int eye = 0; eye < 2; eye++) {
             frameParam.renderLayers[eye].imageHandle = CTX.streamBuffers[eye].eyeTarget[CTX.streamBuffers[eye].index].GetColorAttachment();
