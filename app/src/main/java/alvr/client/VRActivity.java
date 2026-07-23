@@ -56,7 +56,10 @@ public class VRActivity extends Activity {
 
         @Override
         public void surfaceChanged(@NonNull SurfaceHolder holder, int _fmt, int _w, int _h) {
-            maybePause();
+            // Android normally sends surfaceChanged immediately after
+            // surfaceCreated for the same Surface. Restarting native VR here
+            // queued pause/resume back-to-back, which detached the EGL context
+            // after the first two submitted frames and left the headset black.
             mScreenSurface = holder.getSurface();
             maybeResume();
         }
@@ -77,6 +80,7 @@ public class VRActivity extends Activity {
     };
 
     boolean mResumed = false;
+    boolean mNativeResumed = false;
     Handler mRenderingHandler;
     HandlerThread mRenderingHandlerThread;
     Surface mScreenSurface;
@@ -171,10 +175,12 @@ public class VRActivity extends Activity {
         maybeResume();
     }
 
-    void maybeResume() {
-        if (mResumed && mScreenSurface != null) {
+    synchronized void maybeResume() {
+        if (mResumed && mScreenSurface != null && !mNativeResumed) {
+            final Surface surface = mScreenSurface;
+            mNativeResumed = true;
             mRenderingHandler.post(() -> {
-                onResumeNative(mScreenSurface);
+                onResumeNative(surface);
 
                 // bootstrap the rendering loop
                 mRenderingHandler.post(mRenderRunnable);
@@ -190,10 +196,9 @@ public class VRActivity extends Activity {
         super.onPause();
     }
 
-    void maybePause() {
-        // the check (mResumed && mScreenSurface != null) is intended: either mResumed or
-        // mScreenSurface != null will be false after this method returns.
-        if (mResumed && mScreenSurface != null) {
+    synchronized void maybePause() {
+        if (mNativeResumed) {
+            mNativeResumed = false;
             mRenderingHandler.post(this::onPauseNative);
         }
     }
