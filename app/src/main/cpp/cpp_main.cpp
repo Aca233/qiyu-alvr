@@ -793,8 +793,13 @@ void eventsThread() {
                     AlvrDecoderConfig cfg{};
                     cfg.codec = event.DECODER_CONFIG.codec;
                     cfg.force_software_decoder = false;
-                    cfg.max_buffering_frames = 0.0f;
-                    cfg.buffering_history_weight = 0.0f;
+                    // Zero is not a valid value here: the v20 Android decoder
+                    // drops its queue front whenever its measured buffering is
+                    // greater than this value. With 0, every decoded frame is
+                    // discarded before alvr_get_frame() can return it, leaving
+                    // Qiyu with no frame to submit. Match ALVR's v20 defaults.
+                    cfg.max_buffering_frames = 2.0f;
+                    cfg.buffering_history_weight = 0.90f;
                     cfg.options = nullptr;
                     cfg.options_count = 0;
                     cfg.config_buffer = buffer.data();
