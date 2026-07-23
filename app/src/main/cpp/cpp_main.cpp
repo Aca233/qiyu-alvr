@@ -159,6 +159,19 @@ void log(AlvrLogLevel level, const char *format, ...) {
 #define error(...) log(ALVR_LOG_LEVEL_ERROR, __VA_ARGS__)
 #define info(...)  log(ALVR_LOG_LEVEL_INFO, __VA_ARGS__)
 
+static void traceGraphicsState(const char *stage) {
+    __android_log_print(
+        ANDROID_LOG_INFO,
+        "ALVR_QIYU_TRACE",
+        "%s display=%p context=%p draw=%p read=%p glError=0x%x",
+        stage,
+        (void *) eglGetCurrentDisplay(),
+        (void *) eglGetCurrentContext(),
+        (void *) eglGetCurrentSurface(EGL_DRAW),
+        (void *) eglGetCurrentSurface(EGL_READ),
+        glGetError());
+}
+
 namespace QY_GL_EXT
 {
 	bool InitFunction_Foveation()
@@ -844,6 +857,7 @@ Java_alvr_client_VRActivity_initializeNative(JNIEnv *env, jobject context) {
     info("[trace] calling eglInit");
     eglInit();
     info("[trace] eglInit done");
+    traceGraphicsState("after eglInit");
 
     memset(CTX.hapticsState, 0, sizeof(CTX.hapticsState));
     QY_GL_EXT::InitFunction_Foveation();
@@ -854,6 +868,7 @@ Java_alvr_client_VRActivity_initializeNative(JNIEnv *env, jobject context) {
               qiyu_TrackingOriginMode::TM_Ground,
               false);
     info("[trace] qiyu_Init done");
+    traceGraphicsState("after qiyu_Init");
 
     qiyu_DeviceInfo deviceInfo = qiyu_GetDeviceInfo();
     CTX.recommendedViewWidth = deviceInfo.iEyeTargetWidth;
@@ -888,6 +903,7 @@ Java_alvr_client_VRActivity_initializeNative(JNIEnv *env, jobject context) {
     info("[trace] calling alvr_initialize_opengl");
     alvr_initialize_opengl();
     info("[trace] alvr_initialize_opengl done");
+    traceGraphicsState("after alvr_initialize_opengl");
     qiyu_PostSetEyeBufferSize(CTX.recommendedViewWidth, CTX.recommendedViewHeight);
 
     QIYU_PROFILE_ID = alvr_path_string_to_id(QIYU_INTERACTION_PROFILE);
@@ -920,6 +936,7 @@ extern "C" JNIEXPORT void JNICALL Java_alvr_client_VRActivity_onResumeNative(
         return;
     }
     info("[trace] qiyu_StartVR succeeded");
+    traceGraphicsState("after qiyu_StartVR");
 
     qiyu_SetTrackingOriginMode(qiyu_TrackingOriginMode::TM_Ground);
 
@@ -927,10 +944,20 @@ extern "C" JNIEXPORT void JNICALL Java_alvr_client_VRActivity_onResumeNative(
     std::vector<int32_t> textureHandlesBuffer[2];
     for (int eye = 0; eye < 2; eye++) {
         for (int index = 0; index < NUM_EYE_BUFFERS_; index++) {
-            CTX.lobbyBuffers[eye].eyeTarget[index].Init(
+            bool initialized = CTX.lobbyBuffers[eye].eyeTarget[index].Init(
                 false, GL_FOVEATION_ENABLE_BIT_QCOM | GL_FOVEATION_SCALED_BIN_METHOD_BIT_QCOM, false,
                 CTX.recommendedViewWidth, CTX.recommendedViewHeight, 1, GL_RGBA8, false, false);
             auto handle = CTX.lobbyBuffers[eye].eyeTarget[index].GetColorAttachment();
+            __android_log_print(
+                initialized ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
+                "ALVR_QIYU_TRACE",
+                "lobby target eye=%d index=%d initialized=%d texture=%u context=%p glError=0x%x",
+                eye,
+                index,
+                initialized,
+                handle,
+                (void *) eglGetCurrentContext(),
+                glGetError());
             textureHandlesBuffer[eye].push_back(handle);
         }
         CTX.lobbyBuffers[eye].index = 0;
@@ -1171,13 +1198,60 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
             lobbyParams[eye].fov = getFov(&di, eye);
         }
 
-        qiyu_StartEye(false, EYE_Left, TT_Texture);
-        qiyu_StartEye(false, EYE_Right, TT_Texture);
-        info("[trace] lobby: before alvr_render_lobby_opengl");
-        alvr_render_lobby_opengl(lobbyParams, true);
-        info("[trace] lobby: after alvr_render_lobby_opengl");
-        qiyu_EndEye(false, EYE_Left, TT_Texture);
-        qiyu_EndEye(false, EYE_Right, TT_Texture);
+        // Diagnostic path: bypass ALVR/wgpu and draw directly into the Qiyu
+        // render targets. Left eye is red and right eye is green. If these
+        // colors are visible, Qiyu target creation/submission works and the
+        // remaining fault is isolated to ALVR's GL context or renderer.
+        bool startEyeResults[2] = {};
+        bool bindResults[2] = {};
+        bool endEyeResults[2] = {};
+        bool unbindResults[2] = {};
+        for (int eye = 0; eye < 2; eye++) {
+            auto &target =
+                CTX.lobbyBuffers[eye].eyeTarget[CTX.lobbyBuffers[eye].index];
+            qiyu_Eye qiyuEye = eye == 0 ? EYE_Left : EYE_Right;
+
+            bindResults[eye] = target.Bind();
+            if (bindResults[eye]) {
+                startEyeResults[eye] = qiyu_StartEye(false, qiyuEye, TT_Texture);
+                glViewport(
+                    0,
+                    0,
+                    (GLsizei) CTX.recommendedViewWidth,
+                    (GLsizei) CTX.recommendedViewHeight);
+                glDisable(GL_SCISSOR_TEST);
+                glClearColor(
+                    eye == 0 ? 1.0f : 0.0f,
+                    eye == 1 ? 1.0f : 0.0f,
+                    0.0f,
+                    1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glFinish();
+                endEyeResults[eye] = qiyu_EndEye(false, qiyuEye, TT_Texture);
+                unbindResults[eye] = target.UnBind();
+            }
+        }
+
+        if (CTX.ovrFrameIndex < 5 || CTX.ovrFrameIndex % 120 == 0) {
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "ALVR_QIYU_TRACE",
+                "direct lobby frame=%llu context=%p L(start=%d bind=%d end=%d unbind=%d tex=%u) "
+                "R(start=%d bind=%d end=%d unbind=%d tex=%u) glError=0x%x",
+                (unsigned long long) CTX.ovrFrameIndex,
+                (void *) eglGetCurrentContext(),
+                startEyeResults[0],
+                bindResults[0],
+                endEyeResults[0],
+                unbindResults[0],
+                CTX.lobbyBuffers[0].eyeTarget[CTX.lobbyBuffers[0].index].GetColorAttachment(),
+                startEyeResults[1],
+                bindResults[1],
+                endEyeResults[1],
+                unbindResults[1],
+                CTX.lobbyBuffers[1].eyeTarget[CTX.lobbyBuffers[1].index].GetColorAttachment(),
+                glGetError());
+        }
 
         for (int eye = 0; eye < 2; eye++) {
             frameParam.renderLayers[eye].imageHandle = CTX.lobbyBuffers[eye].eyeTarget[CTX.lobbyBuffers[eye].index].GetColorAttachment();
@@ -1191,9 +1265,19 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
     frameParam.minVsyncs = 1;
     frameParam.headPoseState = tracking;
 
-    info("[trace] before qiyu_SubmitFrame");
-    qiyu_SubmitFrame(frameParam);
-    info("[trace] after qiyu_SubmitFrame");
+    bool submitted = qiyu_SubmitFrame(frameParam);
+    if (CTX.ovrFrameIndex < 5 || CTX.ovrFrameIndex % 120 == 0) {
+        __android_log_print(
+            submitted ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
+            "ALVR_QIYU_TRACE",
+            "submit frame=%llu result=%d context=%p leftTexture=%u rightTexture=%u glError=0x%x",
+            (unsigned long long) CTX.ovrFrameIndex,
+            submitted,
+            (void *) eglGetCurrentContext(),
+            (unsigned int) frameParam.renderLayers[0].imageHandle,
+            (unsigned int) frameParam.renderLayers[1].imageHandle,
+            glGetError());
+    }
 
     CTX.ovrFrameIndex++;
 }
