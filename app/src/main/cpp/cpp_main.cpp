@@ -931,19 +931,6 @@ Java_alvr_client_VRActivity_destroyNative(JNIEnv *_env, jobject _context) {
     java.Env->DeleteGlobalRef(CTX.context);
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_alvr_client_VRActivity_setSurfaceNative(
-        JNIEnv *env, jobject _context, jobject surface) {
-    if (CTX.window == nullptr && surface != nullptr) {
-        CTX.window = ANativeWindow_fromSurface(env, surface);
-        __android_log_print(
-            CTX.window != nullptr ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
-            "ALVR_QIYU_TRACE",
-            "setSurfaceNative window=%p",
-            (void *) CTX.window);
-    }
-}
-
 extern "C" JNIEXPORT void JNICALL Java_alvr_client_VRActivity_onResumeNative(
         JNIEnv *_env, jobject _context, jobject surface) {
     if (CTX.lobbyTargetsInitialized) {

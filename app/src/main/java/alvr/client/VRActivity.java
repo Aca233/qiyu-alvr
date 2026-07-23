@@ -34,6 +34,7 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.util.LinkedList;
 import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -52,8 +53,27 @@ public class VRActivity extends Activity {
         public void surfaceCreated(@NonNull final SurfaceHolder holder) {
             Log.i(TAG, "surfaceCreated");
             mScreenSurface = holder.getSurface();
-            setSurfaceNative(mScreenSurface);
-            maybeResume();
+            try {
+                // Keep surfaceCreated on the stack until native/wgpu init and
+                // qiyu_StartVR both finish. If this callback returns earlier,
+                // Dream Pro destroys the Surface and the Qiyu warp thread gets
+                // EGL_BAD_ALLOC ("already connected to another API").
+                mNativeInitLatch.await();
+                if (!mNativeResumed) {
+                    mNativeResumed = true;
+                    CountDownLatch vrStartLatch = new CountDownLatch(1);
+                    final Surface surface = mScreenSurface;
+                    mRenderingHandler.post(() -> {
+                        onResumeNative(surface);
+                        vrStartLatch.countDown();
+                        mRenderingHandler.post(mRenderRunnable);
+                    });
+                    vrStartLatch.await();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                Log.e(TAG, "Interrupted while starting Qiyu VR", e);
+            }
         }
 
         @Override
@@ -88,6 +108,7 @@ public class VRActivity extends Activity {
     boolean mResumed = false;
     boolean mNativeResumed = false;
     boolean mNativeInitialized = false;
+    final CountDownLatch mNativeInitLatch = new CountDownLatch(1);
     Handler mRenderingHandler;
     HandlerThread mRenderingHandlerThread;
     Surface mScreenSurface;
@@ -144,7 +165,7 @@ public class VRActivity extends Activity {
             synchronized (VRActivity.this) {
                 mNativeInitialized = true;
             }
-            runOnUiThread(this::maybeResume);
+            mNativeInitLatch.countDown();
         });
 
         SurfaceHolder holder = surfaceView.getHolder();
@@ -240,8 +261,6 @@ public class VRActivity extends Activity {
     native void destroyNative();
 
     native void onResumeNative(Surface screenSurface);
-
-    native void setSurfaceNative(Surface screenSurface);
 
     native void onPauseNative();
 
