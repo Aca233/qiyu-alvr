@@ -181,8 +181,12 @@ public class VRActivity extends Activity {
         super.onResume();
 
         Log.i(TAG, "onResume");
-        mResumed = true;
-        maybeResume();
+        synchronized (this) {
+            mResumed = true;
+        }
+        if (mRenderingHandler != null) {
+            maybeResume();
+        }
     }
 
     synchronized void maybeResume() {
@@ -205,7 +209,9 @@ public class VRActivity extends Activity {
     @Override
     protected void onPause() {
         maybePause();
-        mResumed = false;
+        synchronized (this) {
+            mResumed = false;
+        }
 
         super.onPause();
     }
