@@ -194,7 +194,7 @@ public class VRActivity extends Activity {
                 + " surface=" + (mScreenSurface != null)
                 + " native=" + mNativeResumed
                 + " initialized=" + mNativeInitialized);
-        if (mResumed && mScreenSurface != null && !mNativeResumed && mNativeInitialized) {
+        if (mScreenSurface != null && !mNativeResumed && mNativeInitialized) {
             final Surface surface = mScreenSurface;
             mNativeResumed = true;
             mRenderingHandler.post(() -> {
@@ -208,11 +208,10 @@ public class VRActivity extends Activity {
 
     @Override
     protected void onPause() {
-        maybePause();
-        synchronized (this) {
-            mResumed = false;
-        }
-
+        // Qiyu's SDK can issue a transient Activity pause while the VR surface
+        // remains valid. Tearing down native VR here detaches EGL and produces
+        // a permanent black screen. surfaceDestroyed() owns native teardown.
+        Log.i(TAG, "onPause (keeping VR active until surfaceDestroyed)");
         super.onPause();
     }
 
@@ -224,7 +223,7 @@ public class VRActivity extends Activity {
     }
 
     private void render() {
-        if (mResumed && mScreenSurface != null) {
+        if (mNativeResumed && mScreenSurface != null) {
             renderNative();
 
             mRenderingHandler.removeCallbacks(mRenderRunnable);
