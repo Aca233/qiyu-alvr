@@ -316,6 +316,28 @@ public:
 
 NativeContext CTX = {};
 
+static bool makeGraphicsContextCurrent(const char *stage) {
+    if (eglGetCurrentContext() == CTX.graphicsContext) {
+        return true;
+    }
+
+    if (eglMakeCurrent(
+            CTX.graphicsDisplay,
+            CTX.graphicsDrawSurface,
+            CTX.graphicsReadSurface,
+            CTX.graphicsContext) == EGL_FALSE) {
+        __android_log_print(
+            ANDROID_LOG_ERROR,
+            "ALVR_QIYU_TRACE",
+            "%s eglMakeCurrent failed error=0x%x",
+            stage,
+            eglGetError());
+        return false;
+    }
+
+    return true;
+}
+
 static const char *EglErrorString(const EGLint err) {
     switch (err) {
         case EGL_SUCCESS: return "EGL_SUCCESS";
@@ -1125,22 +1147,8 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
         return;
     }
 
-    if (eglGetCurrentContext() != CTX.graphicsContext) {
-        if (eglMakeCurrent(
-                CTX.graphicsDisplay,
-                CTX.graphicsDrawSurface,
-                CTX.graphicsReadSurface,
-                CTX.graphicsContext) == EGL_FALSE) {
-            if (CTX.ovrFrameIndex < 5 || CTX.ovrFrameIndex % 120 == 0) {
-                __android_log_print(
-                    ANDROID_LOG_ERROR,
-                    "ALVR_QIYU_TRACE",
-                    "render eglMakeCurrent failed frame=%llu error=0x%x",
-                    (unsigned long long) CTX.ovrFrameIndex,
-                    eglGetError());
-            }
-            return;
-        }
+    if (!makeGraphicsContextCurrent("render begin")) {
+        return;
     }
     double displayTime;
     qiyu_HeadPoseState tracking;
@@ -1198,6 +1206,9 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
         bool streamStartLeft = qiyu_StartEye(false, EYE_Left, TT_Texture);
         bool streamStartRight = qiyu_StartEye(false, EYE_Right, TT_Texture);
         alvr_render_stream_opengl(streamHardwareBuffer, viewParams);
+        if (!makeGraphicsContextCurrent("after ALVR stream render")) {
+            return;
+        }
         glFinish();
         bool streamEndLeft = qiyu_EndEye(false, EYE_Left, TT_Texture);
         bool streamEndRight = qiyu_EndEye(false, EYE_Right, TT_Texture);
@@ -1262,6 +1273,9 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
         bool lobbyStartLeft = qiyu_StartEye(false, EYE_Left, TT_Texture);
         bool lobbyStartRight = qiyu_StartEye(false, EYE_Right, TT_Texture);
         alvr_render_lobby_opengl(lobbyParams, true);
+        if (!makeGraphicsContextCurrent("after ALVR lobby render")) {
+            return;
+        }
         glFinish();
         bool lobbyEndLeft = qiyu_EndEye(false, EYE_Left, TT_Texture);
         bool lobbyEndRight = qiyu_EndEye(false, EYE_Right, TT_Texture);
