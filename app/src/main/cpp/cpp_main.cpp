@@ -1190,10 +1190,12 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
         // with no submitted layer at all ("No valid frame to warp") and can also
         // stall stream startup on runtimes that expect a continuous frame loop.
         if (hasDecodedFrame) {
-            // Register this frame with the compositor and send predicted view params.
-            AlvrViewParams predictedViewParams[2];
-            alvr_report_compositor_start(timestampNs, predictedViewParams);
-            alvr_send_view_params(predictedViewParams);
+            // Register this frame with ALVR's statistics/prediction pipeline.
+            // The returned parameters describe the already encoded video frame;
+            // they are not local head-to-eye transforms and must never be sent
+            // back through alvr_send_view_params().
+            AlvrViewParams encodedViewParams[2];
+            alvr_report_compositor_start(timestampNs, encodedViewParams);
         }
 
         updateHapticsState();
