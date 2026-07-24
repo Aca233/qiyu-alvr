@@ -1061,15 +1061,14 @@ Java_alvr_client_VRActivity_onStreamStartNative(JNIEnv *_env, jobject _context) 
     config.swapchain_textures = (const uint32_t **) textureHandles;
     config.swapchain_length = (uint32_t) textureHandlesBuffer[0].size();
     // StreamingStarted only exposes whether foveated encoding is enabled, not
-    // the six parameters needed to undo it. The previous 1.0/1.0 values make
-    // ALVR's shader-constant calculation divide by a zero-sized edge region,
-    // producing NaN and aborting wgpu pipeline creation. Keep client-side
-    // foveation disabled until the full server configuration can be supplied.
-    config.enable_foveation = false;
+    // the six parameters needed to undo it. Keep these values in lockstep with
+    // the Qiyu server preset in session.json. The old 1.0/1.0 values created a
+    // zero-sized edge region, producing NaN during wgpu pipeline creation.
+    config.enable_foveation = CTX.streamConfig.enable_foveated_encoding;
     config.foveation_center_size_x = 0.66f;
     config.foveation_center_size_y = 0.60f;
-    config.foveation_center_shift_x = 0.0f;
-    config.foveation_center_shift_y = 0.0f;
+    config.foveation_center_shift_x = 0.40f;
+    config.foveation_center_shift_y = 0.10f;
     config.foveation_edge_ratio_x = 6.0f;
     config.foveation_edge_ratio_y = 6.0f;
     config.enable_upscaling = false;
