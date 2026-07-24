@@ -1,0 +1,12 @@
+diff --git a/alvr/client_core/src/c_api.rs b/alvr/client_core/src/c_api.rs
+--- a/alvr/client_core/src/c_api.rs
++++ b/alvr/client_core/src/c_api.rs
+@@ -809,7 +809,7 @@ pub unsafe extern "C" fn alvr_start_stream_opengl(config: AlvrStreamConfig) {
+         swapchain_textures,
+         alvr_graphics::SDR_FORMAT_GL,
+         foveated_encoding,
+-        true,
++        false, // Qiyu GL_RGBA8 compositor targets expect gamma-encoded SDR.
+         false, // TODO: limited range fix config
+         1.0,   // TODO: encoding gamma config
+         upscaling,

@@ -93,6 +93,13 @@ echo "==> Fetching git submodules (openvr headers required by alvr_session)"
 git -C "$SRC/alvr" submodule update --init --recursive --depth 1 \
   || git -C "$SRC/alvr" submodule update --init --recursive
 
+# Qiyu's compositor consumes ordinary GL_RGBA8 gamma-encoded SDR textures.
+# ALVR v20 otherwise performs an sRGB-to-linear conversion and writes that
+# linear value into the non-sRGB target, which makes streamed video dark/gray.
+echo "==> Applying Qiyu color-space patch"
+git -C "$SRC/alvr" apply --check "$ROOT/patches/alvr-v20-qiyu-color.patch"
+git -C "$SRC/alvr" apply "$ROOT/patches/alvr-v20-qiyu-color.patch"
+
 # ---- 2. Toolchain (install only if missing; never swallows real errors) ----
 echo "==> Rust target + tools"
 rustup target add aarch64-linux-android >/dev/null 2>&1 || true

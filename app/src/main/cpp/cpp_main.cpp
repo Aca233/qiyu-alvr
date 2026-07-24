@@ -289,6 +289,14 @@ public:
 
     std::deque<std::pair<uint64_t, qiyu_HeadPoseState>> trackingFrameMap;
     std::mutex trackingFrameMutex;
+    qiyu_HeadPoseState lastDecodedFrameTracking{};
+    bool hasLastDecodedFrameTracking = false;
+    int lastDecodedFrameBufferIndex[2] = {0, 0};
+    uint64_t lastDecodedFrameTimestampNs = 0;
+    uint32_t freshStreamFrames = 0;
+    uint32_t repeatedStreamFrames = 0;
+    uint32_t unmatchedStreamPoses = 0;
+    uint64_t streamStatsStartUs = 0;
 
     QYEyeBuffer lobbyBuffers[2] = {};
     QYEyeBuffer streamBuffers[2] = {};
@@ -1025,6 +1033,16 @@ Java_alvr_client_VRActivity_onStreamStartNative(JNIEnv *_env, jobject _context) 
 
     CTX.refreshRate = CTX.streamConfig.refresh_rate_hint;
     CTX.decoderConfigured = false;
+    CTX.hasLastDecodedFrameTracking = false;
+    CTX.lastDecodedFrameTimestampNs = 0;
+    CTX.freshStreamFrames = 0;
+    CTX.repeatedStreamFrames = 0;
+    CTX.unmatchedStreamPoses = 0;
+    CTX.streamStatsStartUs = getTimestampUs();
+    {
+        std::lock_guard<std::mutex> lock(CTX.trackingFrameMutex);
+        CTX.trackingFrameMap.clear();
+    }
 
     if (CTX.streamTargetsInitialized) {
         error("Ignoring duplicate stream start while stream targets are active");
@@ -1118,6 +1136,12 @@ extern "C" JNIEXPORT void JNICALL
 Java_alvr_client_VRActivity_onStreamStopNative(JNIEnv *_env, jobject _context) {
     CTX.streaming = false;
     CTX.decoderConfigured = false;
+    CTX.hasLastDecodedFrameTracking = false;
+    CTX.lastDecodedFrameTimestampNs = 0;
+    {
+        std::lock_guard<std::mutex> lock(CTX.trackingFrameMutex);
+        CTX.trackingFrameMap.clear();
+    }
 
     alvr_destroy_decoder();
 
@@ -1182,6 +1206,10 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
         uint64_t timestampNs = 0;
         void *streamHardwareBuffer = nullptr;
         const bool hasDecodedFrame = alvr_get_frame(&timestampNs, &streamHardwareBuffer);
+        int submitBufferIndex[2] = {
+            CTX.streamBuffers[0].index,
+            CTX.streamBuffers[1].index,
+        };
 
         // Keep submitting Qiyu frames while waiting for the first decoded image.
         // The stock v20 OpenXR client renders a null hardware buffer in this case
@@ -1199,23 +1227,53 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
 
         updateHapticsState();
 
-        // Fall back to a fresh pose while the decoder has not yielded a frame.
+        // A submitted texture and its render pose are one atomic frame. If the
+        // decoder has no new image, rotating the swapchain while attaching a
+        // freshly predicted pose makes Qiyu warp an older texture as though it
+        // had just been rendered. Reuse both the last decoded texture indices
+        // and its matching pose until a genuinely new decoded frame arrives.
         tracking = qiyu_PredictHeadPose(qiyu_PredictDisplayTime());
-        {
+        bool matchedTracking = false;
+        if (hasDecodedFrame) {
             std::lock_guard<std::mutex> lock(CTX.trackingFrameMutex);
             for (auto &pair: CTX.trackingFrameMap) {
-                if (hasDecodedFrame && pair.first <= timestampNs) {
+                if (pair.first <= timestampNs) {
                     tracking = pair.second;
+                    matchedTracking = true;
                     break;
                 }
             }
+            if (!matchedTracking && !CTX.trackingFrameMap.empty()) {
+                // The decoded timestamp can briefly predate our bounded pose
+                // history during startup. The oldest recorded pose is still a
+                // much closer match than a newly predicted display pose.
+                tracking = CTX.trackingFrameMap.back().second;
+            }
+
+            CTX.lastDecodedFrameTracking = tracking;
+            CTX.hasLastDecodedFrameTracking = true;
+            CTX.lastDecodedFrameTimestampNs = timestampNs;
+            for (int eye = 0; eye < 2; eye++) {
+                CTX.lastDecodedFrameBufferIndex[eye] = CTX.streamBuffers[eye].index;
+                submitBufferIndex[eye] = CTX.streamBuffers[eye].index;
+            }
+            CTX.freshStreamFrames++;
+            if (!matchedTracking) {
+                CTX.unmatchedStreamPoses++;
+            }
+        } else if (CTX.hasLastDecodedFrameTracking) {
+            tracking = CTX.lastDecodedFrameTracking;
+            for (int eye = 0; eye < 2; eye++) {
+                submitBufferIndex[eye] = CTX.lastDecodedFrameBufferIndex[eye];
+            }
+            CTX.repeatedStreamFrames++;
         }
 
         // Build stream view params (identity reprojection: Qiyu does its own ATW).
         AlvrStreamViewParams viewParams[2];
         qiyu_DeviceInfo di = qiyu_GetDeviceInfo();
         for (int eye = 0; eye < 2; eye++) {
-            viewParams[eye].swapchain_index = CTX.streamBuffers[eye].index;
+            viewParams[eye].swapchain_index = submitBufferIndex[eye];
             viewParams[eye].reprojection_rotation.x = 0.f;
             viewParams[eye].reprojection_rotation.y = 0.f;
             viewParams[eye].reprojection_rotation.z = 0.f;
@@ -1225,7 +1283,9 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
 
         bool streamStartLeft = qiyu_StartEye(false, EYE_Left, TT_Texture);
         bool streamStartRight = qiyu_StartEye(false, EYE_Right, TT_Texture);
-        alvr_render_stream_opengl(streamHardwareBuffer, viewParams);
+        if (hasDecodedFrame || !CTX.hasLastDecodedFrameTracking) {
+            alvr_render_stream_opengl(streamHardwareBuffer, viewParams);
+        }
         if (!makeGraphicsContextCurrent("after ALVR stream render")) {
             return;
         }
@@ -1236,9 +1296,15 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
             __android_log_print(
                 ANDROID_LOG_INFO,
                 "ALVR_QIYU_TRACE",
-                "ALVR stream frame=%llu decoded=%d start=%d/%d end=%d/%d context=%p glError=0x%x",
+                "ALVR stream frame=%llu decoded=%d submitIndex=%d/%d timestamp=%llu "
+                "start=%d/%d end=%d/%d context=%p glError=0x%x",
                 (unsigned long long) CTX.ovrFrameIndex,
                 hasDecodedFrame,
+                submitBufferIndex[0],
+                submitBufferIndex[1],
+                (unsigned long long) (hasDecodedFrame
+                    ? timestampNs
+                    : CTX.lastDecodedFrameTimestampNs),
                 streamStartLeft,
                 streamStartRight,
                 streamEndLeft,
@@ -1253,11 +1319,29 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
         }
 
         for (int eye = 0; eye < 2; eye++) {
-            frameParam.renderLayers[eye].imageHandle = CTX.streamBuffers[eye].eyeTarget[CTX.streamBuffers[eye].index].GetColorAttachment();
+            frameParam.renderLayers[eye].imageHandle = CTX.streamBuffers[eye].eyeTarget[submitBufferIndex[eye]].GetColorAttachment();
             frameParam.renderLayers[eye].imageType = TT_Texture;
             CreateLayout_(0.0f, 0.0f, 1.0f, 1.0f, &frameParam.renderLayers[eye].imageCoords);
             frameParam.renderLayers[eye].eyeMask = eye ? RL_EyeMask_Right : RL_EyeMask_Left;
-            CTX.streamBuffers[eye].index = (CTX.streamBuffers[eye].index + 1) % NUM_EYE_BUFFERS_;
+            if (hasDecodedFrame) {
+                CTX.streamBuffers[eye].index =
+                    (CTX.streamBuffers[eye].index + 1) % NUM_EYE_BUFFERS_;
+            }
+        }
+
+        if (currentUs - CTX.streamStatsStartUs >= 1000000) {
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "ALVR_QIYU_TIMING",
+                "stream fresh=%u repeated=%u poseMisses=%u lastTimestamp=%llu",
+                CTX.freshStreamFrames,
+                CTX.repeatedStreamFrames,
+                CTX.unmatchedStreamPoses,
+                (unsigned long long) CTX.lastDecodedFrameTimestampNs);
+            CTX.freshStreamFrames = 0;
+            CTX.repeatedStreamFrames = 0;
+            CTX.unmatchedStreamPoses = 0;
+            CTX.streamStatsStartUs = currentUs;
         }
     } else {
         qiyu_DeviceInfo di = qiyu_GetDeviceInfo();
