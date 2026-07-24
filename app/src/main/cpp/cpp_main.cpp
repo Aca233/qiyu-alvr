@@ -1060,18 +1060,37 @@ Java_alvr_client_VRActivity_onStreamStartNative(JNIEnv *_env, jobject _context) 
     config.view_resolution_height = CTX.streamConfig.view_height;
     config.swapchain_textures = (const uint32_t **) textureHandles;
     config.swapchain_length = (uint32_t) textureHandlesBuffer[0].size();
-    config.enable_foveation = CTX.streamConfig.enable_foveated_encoding;
-    config.foveation_center_size_x = 1.0f;
-    config.foveation_center_size_y = 1.0f;
+    // StreamingStarted only exposes whether foveated encoding is enabled, not
+    // the six parameters needed to undo it. The previous 1.0/1.0 values make
+    // ALVR's shader-constant calculation divide by a zero-sized edge region,
+    // producing NaN and aborting wgpu pipeline creation. Keep client-side
+    // foveation disabled until the full server configuration can be supplied.
+    config.enable_foveation = false;
+    config.foveation_center_size_x = 0.66f;
+    config.foveation_center_size_y = 0.60f;
     config.foveation_center_shift_x = 0.0f;
     config.foveation_center_shift_y = 0.0f;
-    config.foveation_edge_ratio_x = 1.0f;
-    config.foveation_edge_ratio_y = 1.0f;
+    config.foveation_edge_ratio_x = 6.0f;
+    config.foveation_edge_ratio_y = 6.0f;
     config.enable_upscaling = false;
     config.upscaling_edge_direction = false;
     config.upscaling_edge_threshold = 0.0f;
     config.upscaling_edge_sharpness = 0.0f;
     config.upscale_factor = 1.0f;
+    info(
+        "Starting stream renderer: %ux%u swapchain=%u server_foveation=%d "
+        "client_foveation=%d center=%.2f/%.2f shift=%.2f/%.2f edge=%.2f/%.2f",
+        config.view_resolution_width,
+        config.view_resolution_height,
+        config.swapchain_length,
+        CTX.streamConfig.enable_foveated_encoding,
+        config.enable_foveation,
+        config.foveation_center_size_x,
+        config.foveation_center_size_y,
+        config.foveation_center_shift_x,
+        config.foveation_center_shift_y,
+        config.foveation_edge_ratio_x,
+        config.foveation_edge_ratio_y);
     alvr_start_stream_opengl(config);
 
     // Send initial view params (fov/ipd) and battery/playspace to the server.
