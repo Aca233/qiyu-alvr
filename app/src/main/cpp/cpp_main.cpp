@@ -1195,14 +1195,26 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
             viewParams[eye].fov = getFov(&di, eye);
         }
 
-        int swapchainIndices[2] = {CTX.streamBuffers[0].index, CTX.streamBuffers[1].index};
-        qiyu_StartEye(false, EYE_Left, TT_Texture);
-        qiyu_StartEye(false, EYE_Right, TT_Texture);
-        info("[trace] stream: before alvr_render_stream_opengl");
+        bool streamStartLeft = qiyu_StartEye(false, EYE_Left, TT_Texture);
+        bool streamStartRight = qiyu_StartEye(false, EYE_Right, TT_Texture);
         alvr_render_stream_opengl(streamHardwareBuffer, viewParams);
-        info("[trace] stream: after alvr_render_stream_opengl");
-        qiyu_EndEye(false, EYE_Left, TT_Texture);
-        qiyu_EndEye(false, EYE_Right, TT_Texture);
+        glFinish();
+        bool streamEndLeft = qiyu_EndEye(false, EYE_Left, TT_Texture);
+        bool streamEndRight = qiyu_EndEye(false, EYE_Right, TT_Texture);
+        if (CTX.ovrFrameIndex < 5 || CTX.ovrFrameIndex % 120 == 0) {
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "ALVR_QIYU_TRACE",
+                "ALVR stream frame=%llu decoded=%d start=%d/%d end=%d/%d context=%p glError=0x%x",
+                (unsigned long long) CTX.ovrFrameIndex,
+                hasDecodedFrame,
+                streamStartLeft,
+                streamStartRight,
+                streamEndLeft,
+                streamEndRight,
+                (void *) eglGetCurrentContext(),
+                glGetError());
+        }
 
         if (hasDecodedFrame) {
             float vsyncQueueNs = qiyu_PredictDisplayTime() * 1e6f;
@@ -1247,57 +1259,25 @@ Java_alvr_client_VRActivity_renderNative(JNIEnv *_env, jobject _context) {
             lobbyParams[eye].fov = getFov(&di, eye);
         }
 
-        // Diagnostic path: bypass ALVR/wgpu and draw directly into the Qiyu
-        // render targets. Left eye is red and right eye is green. If these
-        // colors are visible, Qiyu target creation/submission works and the
-        // remaining fault is isolated to ALVR's GL context or renderer.
-        bool startEyeResults[2] = {};
-        bool bindResults[2] = {};
-        bool endEyeResults[2] = {};
-        bool unbindResults[2] = {};
-        for (int eye = 0; eye < 2; eye++) {
-            auto &target =
-                CTX.lobbyBuffers[eye].eyeTarget[CTX.lobbyBuffers[eye].index];
-            qiyu_Eye qiyuEye = eye == 0 ? EYE_Left : EYE_Right;
-
-            bindResults[eye] = target.Bind();
-            if (bindResults[eye]) {
-                startEyeResults[eye] = qiyu_StartEye(false, qiyuEye, TT_Texture);
-                glViewport(
-                    0,
-                    0,
-                    (GLsizei) CTX.recommendedViewWidth,
-                    (GLsizei) CTX.recommendedViewHeight);
-                glDisable(GL_SCISSOR_TEST);
-                glClearColor(
-                    eye == 0 ? 1.0f : 0.0f,
-                    eye == 1 ? 1.0f : 0.0f,
-                    0.0f,
-                    1.0f);
-                glClear(GL_COLOR_BUFFER_BIT);
-                glFinish();
-                endEyeResults[eye] = qiyu_EndEye(false, qiyuEye, TT_Texture);
-                unbindResults[eye] = target.UnBind();
-            }
-        }
-
+        bool lobbyStartLeft = qiyu_StartEye(false, EYE_Left, TT_Texture);
+        bool lobbyStartRight = qiyu_StartEye(false, EYE_Right, TT_Texture);
+        alvr_render_lobby_opengl(lobbyParams, true);
+        glFinish();
+        bool lobbyEndLeft = qiyu_EndEye(false, EYE_Left, TT_Texture);
+        bool lobbyEndRight = qiyu_EndEye(false, EYE_Right, TT_Texture);
         if (CTX.ovrFrameIndex < 5 || CTX.ovrFrameIndex % 120 == 0) {
             __android_log_print(
                 ANDROID_LOG_INFO,
                 "ALVR_QIYU_TRACE",
-                "direct lobby frame=%llu context=%p L(start=%d bind=%d end=%d unbind=%d tex=%u) "
-                "R(start=%d bind=%d end=%d unbind=%d tex=%u) glError=0x%x",
+                "ALVR lobby frame=%llu start=%d/%d end=%d/%d context=%p "
+                "leftTexture=%u rightTexture=%u glError=0x%x",
                 (unsigned long long) CTX.ovrFrameIndex,
+                lobbyStartLeft,
+                lobbyStartRight,
+                lobbyEndLeft,
+                lobbyEndRight,
                 (void *) eglGetCurrentContext(),
-                startEyeResults[0],
-                bindResults[0],
-                endEyeResults[0],
-                unbindResults[0],
                 CTX.lobbyBuffers[0].eyeTarget[CTX.lobbyBuffers[0].index].GetColorAttachment(),
-                startEyeResults[1],
-                bindResults[1],
-                endEyeResults[1],
-                unbindResults[1],
                 CTX.lobbyBuffers[1].eyeTarget[CTX.lobbyBuffers[1].index].GetColorAttachment(),
                 glGetError());
         }
